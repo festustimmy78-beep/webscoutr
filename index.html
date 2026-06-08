@@ -405,8 +405,12 @@ function humanDuration(d) {
 }
 function isNew(d) { const m = monthsAgo(d); return m !== null && m <= 12; }
 function getStartDate(p) {
-  return p?.experiences?.[0]?.start_date || p?.experience?.[0]?.start_date
-    || p?.current_experience?.start_date || p?.started_at || null;
+  const exps = p?.experience || p?.experiences || [];
+  if (exps.length) {
+    const first = exps[0];
+    return first.start_date || first.started_at || first.from || null;
+  }
+  return p?.current_experience?.start_date || p?.started_at || null;
 }
 function fmtDate(s) {
   if (!s) return '';
@@ -474,14 +478,14 @@ function renderResults(people, page) {
 
   people.forEach((p, idx) => {
     const name = p.name || p.full_name || 'Unknown';
-    const title = p.headline || p.title || p.current_title || '';
-    const company = p.company || p.current_company?.name || p.organization || '';
-    const location = p.location || p.city || '';
+    const title = p.headline || p.title || p.current_title || p.job_title || '';
+    const company = p.company?.name || (typeof p.company === 'string' ? p.company : '') || p.organization || p.current_company || '';
+    const location = p.location || p.city || p.country || '';
     const sd = getStartDate(p);
     const newRole = isNew(sd);
     const duration = humanDuration(sd);
-    const hasWebsite = !!(p.company_domain || p.current_company?.website || p.website);
-    const linkedin = p.linkedin_url || p.profile_url || '';
+    const hasWebsite = !!(p.company?.website || p.company?.domain || p.company_domain || p.company_website || p.website);
+    const linkedin = p.linkedin_url || p.profile_url || p.url || '';
 
     html += `<div class="result-card">
       <div class="flex items-start justify-between gap-3 mb-2">
@@ -530,15 +534,29 @@ async function revealProfile(url, name, base) {
   try {
     const res = await fetch(`/.netlify/functions/contactout?_endpoint=enrich&profile=${encodeURIComponent(url)}`);
     const data = await res.json();
-    if (data.error || data.message) {
+
+    if (data.error) {
       document.getElementById('profile-content').innerHTML = `<div class="glass p-6 mt-4"><p class="text-[14px]" style="color:#b91c1c">Something went wrong fetching this profile. Try again in a moment.</p></div>`;
       return;
     }
-    const p = data?.data?.person || data?.person || data?.profile || data?.data || data;
-    p._linkedin = url; p._name = name; p._base = base;
+
+    // Backend now normalizes to data.person — fall back broadly
+    const p = data.person || data.profile || data.data?.person || data.data || data;
+
+    // Merge in base card data for anything the enrich didn't return
+    if (base) {
+      if (!p.linkedin_url && base.linkedin_url) p.linkedin_url = base.linkedin_url;
+      if (!p.name && !p.full_name) p.name = base.name || base.full_name || name;
+      if (!p.headline && !p.title) p.headline = base.headline || base.title || '';
+      if (!p.location) p.location = base.location || base.city || '';
+    }
+
+    p._linkedin = url;
+    p._name = name;
+    p._base = base;
     renderProfile(p);
     loadCredits();
-  } catch {
+  } catch(e) {
     document.getElementById('profile-content').innerHTML = `<div class="glass p-6 mt-4"><p class="text-[14px]" style="color:#b91c1c">Something went wrong fetching this profile. Try again in a moment.</p></div>`;
   }
 }
@@ -557,59 +575,110 @@ document.getElementById('back-btn').addEventListener('click', () => {
 // ── Render Profile ──────────────────────────────────────────────────
 function renderProfile(p) {
   const name = p.name || p.full_name || p._name || 'Unknown';
-  const headline = p.headline || p.title || '';
-  const location = p.location || p.city || '';
-  const linkedin = p._linkedin || p.linkedin_url || '';
-  const github = p.github || p.github_url || '';
-  const twitter = p.twitter || p.twitter_url || '';
-  const summary = p.summary || p.about || '';
+  const headline = p.headline || p.title || p.current_title || '';
+  const location = p.location || p.city || p.country || '';
+  const linkedin = p._linkedin || p.linkedin_url || p.url || '';
+  const summary = p.summary || p.about || p.bio || '';
 
-  const co = p.company || p.current_company || {};
-  const coName = (typeof co==='string'?co:co.name) || p.organization || '';
-  const coWebsite = co.website || co.domain || p.company_domain || p.company_website || '';
+  // Social handles — ContactOut returns these as arrays or strings
+  const githubRaw = p.github;
+  const twitterRaw = p.twitter;
+  const github = Array.isArray(githubRaw) ? githubRaw[0] : githubRaw || '';
+  const twitter = Array.isArray(twitterRaw) ? twitterRaw[0] : twitterRaw || '';
+
+  // Company — ContactOut nests company data under p.company object
+  const co = (typeof p.company === 'object' && p.company !== null) ? p.company : {};
+  const coName = co.name || (typeof p.company === 'string' ? p.company : '') || p.organization || p.current_company || '';
+  const coWebsite = co.website || co.domain || co.url || p.company_domain || p.company_website || p.website || '';
   const coIndustry = co.industry || p.company_industry || p.industry || '';
-  const coSize = co.size || p.company_size || '';
-  const coRevenue = co.revenue || p.company_revenue || '';
-  const coDesc = co.description || p.company_description || '';
-  const coFounded = co.founded || p.company_founded || '';
+  const coSize = co.size || co.headcount || p.company_size || '';
+  const coRevenue = co.revenue || p.company_revenue || p.revenue || '';
+  const coDesc = co.description || co.overview || p.company_description || '';
+  const coFounded = co.founded_at || co.founded || p.company_founded || '';
   const coCountry = co.country || '';
+  const coLocations = co.locations || [];
   const coSpecialties = co.specialties || [];
+  const coLogo = co.logo_url || co.logo || '';
 
-  const emails = [
-    ...(p.emails || []),
-    ...(p.email ? [{email: p.email, type: 'work'}] : []),
-    ...(p.personal_emails?.map(e=>({email:e,type:'personal'})) || []),
-    ...(p.work_emails?.map(e=>({email:e,type:'work'})) || []),
-  ].filter((e,i,a) => e.email && a.findIndex(x=>x.email===e.email)===i);
+  // Emails — ContactOut returns: email[] (mixed), personal_email[], work_email[]
+  // Each can be a string or an object {email, type}
+  const emailSet = new Set();
+  const emailList = [];
 
-  const phones = [
-    ...(p.phones || []),
-    ...(p.phone ? [{phone: p.phone}] : []),
-  ].filter((ph,i,a) => ph.phone && a.findIndex(x=>x.phone===ph.phone)===i);
+  function addEmail(val, type) {
+    const addr = typeof val === 'string' ? val : val?.email || val?.address || '';
+    const t = type || val?.type || 'Email';
+    if (addr && !emailSet.has(addr)) {
+      emailSet.add(addr);
+      emailList.push({ email: addr, type: t });
+    }
+  }
 
-  const experiences = p.experiences || p.experience || [];
+  // p.email — flat array of strings (ContactOut primary format)
+  if (Array.isArray(p.email)) p.email.forEach(e => addEmail(e, 'Email'));
+  else if (typeof p.email === 'string' && p.email) addEmail(p.email, 'Email');
+
+  // p.personal_email — array of strings
+  if (Array.isArray(p.personal_email)) p.personal_email.forEach(e => addEmail(e, 'Personal Email'));
+  if (Array.isArray(p.personal_emails)) p.personal_emails.forEach(e => addEmail(e, 'Personal Email'));
+
+  // p.work_email — array of strings
+  if (Array.isArray(p.work_email)) p.work_email.forEach(e => addEmail(e, 'Work Email'));
+  if (Array.isArray(p.work_emails)) p.work_emails.forEach(e => addEmail(e, 'Work Email'));
+
+  // p.emails — array of objects or strings (fallback)
+  if (Array.isArray(p.emails)) p.emails.forEach(e => addEmail(e, e?.type || 'Email'));
+
+  // Phones — ContactOut returns: phone[] array of strings
+  const phoneSet = new Set();
+  const phoneList = [];
+
+  function addPhone(val) {
+    const num = typeof val === 'string' ? val : val?.phone || val?.number || val?.value || '';
+    if (num && !phoneSet.has(num)) { phoneSet.add(num); phoneList.push(num); }
+  }
+
+  if (Array.isArray(p.phone)) p.phone.forEach(addPhone);
+  else if (typeof p.phone === 'string' && p.phone) addPhone(p.phone);
+  if (Array.isArray(p.phones)) p.phones.forEach(addPhone);
+
+  // Experience
+  const experiences = p.experience || p.experiences || [];
   const education = p.education || p.educations || [];
   const skills = p.skills || [];
   const languages = p.languages || [];
   const hasWebsite = !!coWebsite;
 
-  const profileForDraft = { name, headline, company: coName, company_website: coWebsite, company_industry: coIndustry, company_description: coDesc, company_size: coSize, summary, current_title: headline, current_role_start: getStartDate(p), has_website: hasWebsite };
+  const profileForDraft = {
+    name,
+    headline,
+    company: coName,
+    company_website: coWebsite,
+    company_industry: coIndustry,
+    company_description: coDesc,
+    company_size: coSize,
+    summary,
+    current_title: headline,
+    current_role_start: getStartDate(p),
+    has_website: hasWebsite,
+    emails: emailList,
+    phones: phoneList,
+  };
 
   let html = '';
 
   // ── Contact details ──
   html += `<div class="glass p-6 mb-4">
     <div class="section-label">Contact Details</div>`;
-  if (emails.length) {
-    emails.forEach(e => {
-      const lbl = e.type==='personal'?'Personal Email':e.type==='work'?'Work Email':'Email';
-      html += contactRowHtml(lbl, e.email);
+  if (emailList.length) {
+    emailList.forEach(e => {
+      html += contactRowHtml(e.type, e.email);
     });
   } else {
     html += `<p class="text-[14px] text-navy/40 font-500 italic">Email not available</p>`;
   }
-  if (phones.length) {
-    phones.forEach(ph => { html += contactRowHtml('Phone', ph.phone||ph.number||ph); });
+  if (phoneList.length) {
+    phoneList.forEach(num => { html += contactRowHtml('Phone', num); });
   } else {
     html += `<p class="text-[14px] text-navy/40 font-500 italic mt-3">Phone not available</p>`;
   }
@@ -644,10 +713,15 @@ function renderProfile(p) {
   </div>`;
 
   // ── Company ──
-  if (coName||coIndustry||coDesc) {
+  if (coName || coIndustry || coDesc) {
     html += `<div class="glass p-6 mb-4"><div class="section-label">Company</div>`;
+    if (coLogo) html += `<img src="${esc(coLogo)}" alt="${esc(coName)} logo" style="height:40px;object-fit:contain;margin-bottom:12px;border-radius:6px;">`;
     const rows = [['Name',coName],['Industry',coIndustry],['Size',coSize],['Revenue',coRevenue],['Country',coCountry],['Founded',String(coFounded||'')]];
     rows.forEach(([k,v]) => { if(v) html += `<div class="flex gap-3 mb-2"><span class="text-[12px] font-600 text-navy/40 w-20 flex-shrink-0 pt-0.5">${k}</span><span class="text-[14px] font-600 text-navy">${esc(v)}</span></div>`; });
+    if (coLocations.length) {
+      const locStr = coLocations.map(l => typeof l === 'string' ? l : [l.city, l.country].filter(Boolean).join(', ')).filter(Boolean).join(' · ');
+      if (locStr) html += `<div class="flex gap-3 mb-2"><span class="text-[12px] font-600 text-navy/40 w-20 flex-shrink-0 pt-0.5">Offices</span><span class="text-[14px] font-600 text-navy">${esc(locStr)}</span></div>`;
+    }
     if (coDesc) html += `<p class="text-[13px] text-navy/55 font-400 leading-relaxed mt-3 mb-3">${esc(coDesc)}</p>`;
     if (coSpecialties.length) html += `<div class="flex flex-wrap gap-2 mt-2">${coSpecialties.map(s=>`<span class="spec-tag">${esc(s)}</span>`).join('')}</div>`;
     html += `</div>`;
@@ -663,11 +737,15 @@ function renderProfile(p) {
   if (experiences.length) {
     html += `<div class="glass p-6 mb-4"><div class="section-label">Experience</div>`;
     experiences.forEach((ex, i) => {
-      const isCurrent = !ex.end_date || ex.end_date==='Present' || ex.current;
+      const exTitle = ex.title || ex.job_title || ex.position || '';
+      const exCompany = ex.company || ex.company_name || ex.organization || '';
+      const exStart = ex.start_date || ex.started_at || ex.from || '';
+      const exEnd = ex.end_date || ex.ended_at || ex.to || '';
+      const isCurrent = !exEnd || exEnd === 'Present' || ex.current === true;
       html += `<div class="exp-item ${i===0?'exp-current':''}">
-        <div class="text-[15px] font-700 text-navy">${esc(ex.title||ex.job_title||'')}</div>
-        ${ex.company||ex.organization?`<div class="text-[13px] font-500 text-navy/55 mt-0.5">${esc(ex.company||ex.organization)}</div>`:''}
-        <div class="text-[12px] text-navy/35 font-500 mt-1">${fmtDate(ex.start_date||ex.started_at)}${(ex.start_date||ex.started_at)?' – ':''}${isCurrent?'Present':fmtDate(ex.end_date||ex.ended_at)}</div>
+        <div class="text-[15px] font-700 text-navy">${esc(exTitle)}</div>
+        ${exCompany?`<div class="text-[13px] font-500 text-navy/55 mt-0.5">${esc(exCompany)}</div>`:''}
+        <div class="text-[12px] text-navy/35 font-500 mt-1">${fmtDate(exStart)}${exStart?' – ':''}${isCurrent?'Present':fmtDate(exEnd)}</div>
       </div>`;
     });
     html += `</div>`;
